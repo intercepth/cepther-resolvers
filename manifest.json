@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "updated": "2026-11-14",
+  "hosts": [
+    {
+      "host": "mediafire.com",
+      "kind": "direct_link",
+      "link_host_pattern": "^download\d*\.mediafire\.com$"
+    },
+    {
+      "host": "drive.google.com",
+      "kind": "form_follow",
+      "id_pattern": "(?:/file/d/|[?&]id=)([A-Za-z0-9_-]{10,})",
+      "first_url_template": "https://drive.google.com/uc?export=download&id={id}",
+      "form_match": {"any_field": "confirm", "action_contains": "download"}
+    }
+  ]
+}
