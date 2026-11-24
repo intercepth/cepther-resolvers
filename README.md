@@ -3,11 +3,19 @@
 Declarative "how to find the real download link on this page" definitions
 for Cepther's File Downloads feature.
 
-This repo holds **data only** -- a JSON manifest describing, per file-locker
-host, where on its landing page the real file address lives (a direct link
-matching a pattern, or a follow-up form to submit). It never holds, and will
-never hold, executable code of any kind -- no scripts, no eval'd strings, no
-shell commands, nothing. The app fetches `manifest.json` once a day,
+This repo has two separate parts with **different trust levels**:
+
+1. **`manifest.json` -- data only.** A JSON manifest describing, per file-locker
+   host, where on its landing page the real file address lives (a direct link
+   matching a pattern, or a follow-up form to submit). It never holds, and will
+   never hold, executable code of any kind -- no scripts, no eval'd strings, no
+   shell commands, nothing. This is the only part the running app downloads.
+2. **`java/` -- source code for the app's built-in resolvers** (Google Drive
+   files/folders, Dropbox, Pixeldrain, captcha plumbing, ...). It is compiled
+   *into* the app at build time and is **never fetched or executed at runtime**.
+   See [Java resolver library](#java-resolver-library).
+
+The app fetches `manifest.json` once a day,
 validates it strictly (size-capped, every field checked against a known
 shape, the whole file rejected if the top-level shape is off), and uses it
 only to decide which link or form field on an already-fetched page is the
@@ -116,10 +124,58 @@ before using it, an invalid one is simply skipped, and the two sites
 Cepther ships with built in (MediaFire, Google Drive) never depend on this
 file at all.
 
-## What won't be accepted
+## Java resolver library
+
+`java/` is a dependency-free (JDK only) library for the sites the manifest
+can't express: multi-step flows, JSON APIs, folder listings, captchas.
+
+```
+./java/build.sh                      # compile (--release 11) + run the offline tests
+java -cp java/out com.cepther.resolvers.Cli [--drive-api-key KEY] [--2captcha-key KEY] [--manifest manifest.json] URL...
+```
+
+| Resolver | Handles | Notes |
+|---|---|---|
+| `GoogleDriveFileResolver` | `file/d/ID`, `open?id=`, `uc?id=`, `drive.usercontent...download?id=` | Follows the large-file virus-scan form; typed errors for quota / private / deleted. |
+| `GoogleDriveFolderResolver` | `drive/folders/ID`, `folderview?id=` | Recurses into subfolders. With option `gdrive.apiKey` uses the Drive v3 API (complete, paginated, sizes). Without it scrapes `embeddedfolderview`, which Google truncates at roughly 50 entries (a warning is emitted). |
+| `GoogleDocsResolver` | Docs / Sheets / Slides | Exports as docx/xlsx/pptx, or `gdocs.format` (e.g. `pdf`). |
+| `DropboxResolver` | `/s/`, `/scl/fi/`, `/scl/fo/`, `/sh/` | `dl=1` rewrite; folders arrive as a zip; password links -> `LOGIN_REQUIRED`. |
+| `PixeldrainResolver` | `/u/ID`, `/l/ID` | Public JSON API; lists return every file. |
+| `MediaFireResolver` | `/file/...`, `/download/...` | Download button href or base64 `data-scrambled-url`; host must be `downloadN.mediafire.com`. Folders not handled. |
+| `ManifestResolver` | everything in `manifest.json` | Runs `direct_link` / `form_follow` entries in Java. Built-ins are registered first and win. |
+
+**Architecture.** A `Resolver` turns one URL into a `ResolveResult` of
+`ResolvedFile`s. A file is either *direct* (bytes come from `url`) or a *link*
+(another page to resolve, e.g. a file inside a folder); `ResolverRegistry.resolveAll`
+keeps resolving links until everything is direct, turning per-child failures
+into warnings. All networking goes through the tiny `Http` interface -- implement
+it with OkHttp or whatever the app uses (`JdkHttp` needs `java.net.http`, so
+it is not usable on Android as-is).
+
+**Captchas.** Same model as JDownloader2: a `CaptchaSolver` is a plug-in point.
+When a resolver meets a captcha it asks `ResolveContext.solveCaptcha(...)`;
+the answer comes from (in order, via `CaptchaSolver.chain`) whatever you
+register: your own UI (show the image / embed the widget in a WebView and return
+the typed text or token), `TwoCaptchaSolver` (2captcha-compatible API, the
+user's own key and balance), or `ConsoleCaptchaSolver` (CLI image captchas).
+If nobody answers, the resolver throws `CAPTCHA_REQUIRED` so the app can prompt.
+`ManifestResolver` already does this for reCAPTCHA / hCaptcha / Turnstile widgets
+inside a `form_follow` confirm form. There is deliberately no "bypass" that
+defeats a site's protection without a human or a paid solving service.
+
+**What is and isn't verified.** The tests (`java/src/test`) run offline against
+hand-written fixtures that mimic each site's page/API shape. They prove the
+logic, not that the live sites still look like the fixtures -- these resolvers
+were written without network access. Before relying on one, run the `Cli` on
+real links; when a site changes, the fix is a fixture + a regex in one file.
+Sites with sign-in, decryption (Mega) or JS-computed tokens (GoFile) are not
+done yet.
+
+## What won't be accepted into `manifest.json`
 
 - Anything that isn't plain data in the shapes above -- no scripts, no
-  "just eval this", no field that ends up in a shell command.
+  "just eval this", no field that ends up in a shell command. (Code belongs in
+  `java/`, which the app compiles in and never downloads.)
 - Sites that need a login to reach the file.
 - Sites that need more than one follow-up page (`form_follow` only follows
   one confirm step).
